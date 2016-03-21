@@ -127,7 +127,16 @@ func execute(filename string, data interface{}, compress bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	tmpl, err := template.New(filename).Parse(string(raw))
+
+	var arithFuncs = template.FuncMap{
+		"add": func(x, y int) int { return x + y },
+		"sub": func(x, y int) int { return x - y },
+		"mul": func(x, y int) int { return x * y },
+		"div": func(x, y int) int { return x / y },
+	}
+
+	tmpl, err := template.New(filename).Funcs(arithFuncs).Parse(string(raw))
+
 	if err != nil {
 		return "", err
 	}
