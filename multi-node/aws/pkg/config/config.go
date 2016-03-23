@@ -13,6 +13,10 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/kms"
+
 	"github.com/coreos/coreos-cloudinit/config/validate"
 	yaml "gopkg.in/yaml.v2"
 )
@@ -31,7 +35,6 @@ func newDefaultCluster() *Cluster {
 		ControllerIP:             "10.0.0.50",
 		PodCIDR:                  "10.2.0.0/16",
 		ServiceCIDR:              "10.3.0.0/24",
-		KubernetesServiceIP:      "10.3.0.1",
 		DNSServiceIP:             "10.3.0.10",
 		K8sVer:                   "v1.1.8_coreos.0",
 		HyperkubeImageRepo:       "quay.io/coreos/hyperkube",
@@ -82,17 +85,22 @@ type Cluster struct {
 	WorkerInstanceType       string `yaml:"workerInstanceType"`
 	WorkerRootVolumeSize     int    `yaml:"workerRootVolumeSize"`
 	WorkerSpotPrice          string `yaml:"workerSpotPrice"`
+	VPCID                    string `yaml:"vpcId"`
+	RouteTableID             string `yaml:"routeTableId"`
 	VPCCIDR                  string `yaml:"vpcCIDR"`
 	InstanceCIDR             string `yaml:"instanceCIDR"`
 	ControllerIP             string `yaml:"controllerIP"`
 	PodCIDR                  string `yaml:"podCIDR"`
 	ServiceCIDR              string `yaml:"serviceCIDR"`
-	KubernetesServiceIP      string `yaml:"kubernetesServiceIP"` //TODO(chom): remove KubernetesServiceIP parameter, it is not configurable
 	DNSServiceIP             string `yaml:"dnsServiceIP"`
 	K8sVer                   string `yaml:"kubernetesVersion"`
 	HyperkubeImageRepo       string `yaml:"hyperkubeImageRepo"`
 	KMSKeyARN                string `yaml:"kmsKeyArn"`
 }
+
+const (
+	vpcLogicalName = "VPC"
+)
 
 func (c Cluster) Config() (*Config, error) {
 	config := Config{Cluster: c}
@@ -106,7 +114,23 @@ func (c Cluster) Config() (*Config, error) {
 		return nil, fmt.Errorf("failed getting AMI for config: %v", err)
 	}
 
+	//Set logical name constants
+	config.VPCLogicalName = vpcLogicalName
+
+	//Set reference strings
+	config.VPCRef = dynamicResourceRef(vpcLogicalName, config.VPCID)
+
 	return &config, nil
+}
+
+func dynamicResourceRef(logicalName, resID string) string {
+	if resID == "" {
+		//This resource will be created by the stack. Will be referenced by it's logical name
+		return fmt.Sprintf(`{ "Ref" : "%s" }`, logicalName)
+	}
+
+	//External resource already exists outside of the stack. Will be referenced by id
+	return fmt.Sprintf(`"%s"`, resID)
 }
 
 type StackTemplateOptions struct {
@@ -161,7 +185,11 @@ func (c Cluster) stackConfig(opts StackTemplateOptions, compressUserData bool) (
 		return nil, err
 	}
 
-	compactAssets, err := assets.Compact(stackConfig.Config)
+	awsConfig := aws.NewConfig()
+	awsConfig = awsConfig.WithRegion(stackConfig.Config.Region)
+	kmsSvc := kms.New(session.New(awsConfig))
+
+	compactAssets, err := assets.compact(stackConfig.Config, kmsSvc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compress TLS assets: %v", err)
 	}
@@ -254,6 +282,12 @@ type Config struct {
 
 	// Encoded TLS assets
 	TLSConfig *CompactTLSAssets
+
+	//Logical names of dynamic resources
+	VPCLogicalName string
+
+	//Reference strings for dynamic resources
+	VPCRef string
 }
 
 func (cfg Cluster) valid() error {
@@ -272,8 +306,15 @@ func (cfg Cluster) valid() error {
 	if cfg.ClusterName == "" {
 		return errors.New("clusterName must be set")
 	}
+	if cfg.KMSKeyARN == "" {
+		return errors.New("kmsKeyArn must be set")
+	}
 
-	_, vpcNet, err := net.ParseCIDR(cfg.VPCCIDR)
+	if cfg.VPCID == "" && cfg.RouteTableID != "" {
+		return errors.New("vpcId must be specified if routeTableId is specified")
+	}
+
+	vpcNetIP, vpcNet, err := net.ParseCIDR(cfg.VPCCIDR)
 	if err != nil {
 		return fmt.Errorf("invalid vpcCIDR: %v", err)
 	}
@@ -312,19 +353,19 @@ func (cfg Cluster) valid() error {
 	if err != nil {
 		return fmt.Errorf("invalid serviceCIDR: %v", err)
 	}
-	if vpcNet.Contains(serviceNetIP) {
+	if vpcNet.Contains(serviceNetIP) || serviceNet.Contains(vpcNetIP) {
 		return fmt.Errorf("vpcCIDR (%s) overlaps with serviceCIDR (%s)", cfg.VPCCIDR, cfg.ServiceCIDR)
+	}
+	if vpcNet.Contains(podNetIP) || podNet.Contains(vpcNetIP) {
+		return fmt.Errorf("vpcCIDR (%s) overlaps with podCIDR (%s)", cfg.VPCCIDR, cfg.PodCIDR)
 	}
 	if podNet.Contains(serviceNetIP) || serviceNet.Contains(podNetIP) {
 		return fmt.Errorf("serviceCIDR (%s) overlaps with podCIDR (%s)", cfg.ServiceCIDR, cfg.PodCIDR)
 	}
 
-	kubernetesServiceIPAddr := net.ParseIP(cfg.KubernetesServiceIP)
-	if kubernetesServiceIPAddr == nil {
-		return fmt.Errorf("Invalid kubernetesServiceIP: %s", cfg.KubernetesServiceIP)
-	}
+	kubernetesServiceIPAddr := incrementIP(serviceNet.IP)
 	if !serviceNet.Contains(kubernetesServiceIPAddr) {
-		return fmt.Errorf("serviceCIDR (%s) does not contain kubernetesServiceIP (%s)", cfg.ServiceCIDR, cfg.KubernetesServiceIP)
+		return fmt.Errorf("serviceCIDR (%s) does not contain kubernetesServiceIP (%s)", cfg.ServiceCIDR, kubernetesServiceIPAddr)
 	}
 
 	dnsServiceIPAddr := net.ParseIP(cfg.DNSServiceIP)
@@ -335,5 +376,24 @@ func (cfg Cluster) valid() error {
 		return fmt.Errorf("serviceCIDR (%s) does not contain dnsServiceIP (%s)", cfg.ServiceCIDR, cfg.DNSServiceIP)
 	}
 
+	if dnsServiceIPAddr.Equal(kubernetesServiceIPAddr) {
+		return fmt.Errorf("dnsServiceIp conflicts with kubernetesServiceIp (%s)", dnsServiceIPAddr)
+	}
+
 	return nil
+}
+
+//Return next IP address in network range
+func incrementIP(netIP net.IP) net.IP {
+	ip := make(net.IP, len(netIP))
+	copy(ip, netIP)
+
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
+
+	return ip
 }

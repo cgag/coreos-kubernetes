@@ -5,13 +5,13 @@ import (
 	"compress/gzip"
 	"crypto/rsa"
 	"encoding/base64"
+	"fmt"
 	"io/ioutil"
+	"net"
 	"path/filepath"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kms"
-
 	"github.com/coreos/coreos-kubernetes/multi-node/aws/pkg/tlsutil"
 )
 
@@ -59,6 +59,13 @@ func (c *Cluster) NewTLSAssets() (*RawTLSAssets, error) {
 		return nil, err
 	}
 
+	//Compute kubernetesServiceIP from serviceCIDR
+	_, serviceNet, err := net.ParseCIDR(c.ServiceCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("invalid serviceCIDR: %v", err)
+	}
+	kubernetesServiceIPAddr := incrementIP(serviceNet.IP)
+
 	apiServerConfig := tlsutil.ServerCertConfig{
 		CommonName: "kube-apiserver",
 		DNSNames: []string{
@@ -70,7 +77,7 @@ func (c *Cluster) NewTLSAssets() (*RawTLSAssets, error) {
 		},
 		IPAddresses: []string{
 			c.ControllerIP,
-			c.KubernetesServiceIP,
+			kubernetesServiceIPAddr.String(),
 		},
 	}
 	apiServerCert, err := tlsutil.NewSignedServerCertificate(apiServerConfig, apiServerKey, caCert, caKey)
@@ -174,30 +181,28 @@ func compressData(d []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(buff.Bytes()), nil
 }
 
-func (r *RawTLSAssets) Compact(cfg *Config) (*CompactTLSAssets, error) {
+type encryptService interface {
+	Encrypt(*kms.EncryptInput) (*kms.EncryptOutput, error)
+}
 
-	awsConfig := aws.NewConfig()
-	awsConfig = awsConfig.WithRegion(cfg.Region)
-	kmsSvc := kms.New(session.New(awsConfig))
-
+func (r *RawTLSAssets) compact(cfg *Config, kmsSvc encryptService) (*CompactTLSAssets, error) {
 	var err error
 	compact := func(data []byte) string {
 		if err != nil {
 			return ""
 		}
 
-		if cfg.KMSKeyARN != "" {
-			encryptInput := kms.EncryptInput{
-				KeyId:     aws.String(cfg.KMSKeyARN),
-				Plaintext: data,
-			}
-
-			var encryptOutput *kms.EncryptOutput
-			if encryptOutput, err = kmsSvc.Encrypt(&encryptInput); err != nil {
-				return ""
-			}
-			data = encryptOutput.CiphertextBlob
+		encryptInput := kms.EncryptInput{
+			KeyId:     aws.String(cfg.KMSKeyARN),
+			Plaintext: data,
 		}
+
+		var encryptOutput *kms.EncryptOutput
+		if encryptOutput, err = kmsSvc.Encrypt(&encryptInput); err != nil {
+			return ""
+		}
+		data = encryptOutput.CiphertextBlob
+
 		var out string
 		if out, err = compressData(data); err != nil {
 			return ""
