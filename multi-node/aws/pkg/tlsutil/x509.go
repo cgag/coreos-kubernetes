@@ -14,6 +14,10 @@ import (
 var (
 	Duration90d  = time.Hour * 24 * 90
 	Duration365d = time.Hour * 24 * 365
+	Duration20m  = time.Minute * 20
+	Duration10m  = time.Minute * 10
+	Duration15m  = time.Minute * 15
+	Duration30m  = time.Minute * 30
 )
 
 type CACertConfig struct {
@@ -75,7 +79,7 @@ func NewSignedServerCertificate(cfg ServerCertConfig, key *rsa.PrivateKey, caCer
 		IPAddresses:  ips,
 		SerialNumber: serial,
 		NotBefore:    caCert.NotBefore,
-		NotAfter:     time.Now().Add(Duration90d).UTC(),
+		NotAfter:     time.Now().Add(Duration15m).UTC(),
 		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
@@ -106,7 +110,7 @@ func NewSignedClientCertificate(cfg ClientCertConfig, key *rsa.PrivateKey, caCer
 		IPAddresses:  ips,
 		SerialNumber: serial,
 		NotBefore:    caCert.NotBefore,
-		NotAfter:     time.Now().Add(Duration90d).UTC(),
+		NotAfter:     time.Now().Add(Duration15m).UTC(),
 		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}

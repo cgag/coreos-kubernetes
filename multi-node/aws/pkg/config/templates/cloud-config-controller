@@ -41,6 +41,7 @@ coreos:
         Environment=KUBELET_ACI={{.HyperkubeImageRepo}}
         Environment="RKT_OPTS=--volume dns,kind=host,source=/etc/resolv.conf --mount volume=dns,target=/etc/resolv.conf"
         ExecStart=/usr/lib/coreos/kubelet-wrapper \
+        --v=4 \
         --api-servers=http://localhost:8080 \
         --network-plugin-dir=/etc/kubernetes/cni/net.d \
         --network-plugin={{.K8sNetworkPlugin}} \
@@ -195,6 +196,7 @@ write_files:
             command:
             - /hyperkube
             - proxy
+            - --v=4
             - --master=http://127.0.0.1:8080
             securityContext:
               privileged: true
@@ -222,6 +224,7 @@ write_files:
           command:
           - /hyperkube
           - apiserver
+          - --v=4
           - --bind-address=0.0.0.0
           - --etcd-servers=http://localhost:2379
           - --allow-privileged=true
@@ -278,6 +281,7 @@ write_files:
           command:
           - /hyperkube
           - controller-manager
+          - --v=4
           - --master=http://127.0.0.1:8080
           - --leader-elect=true
           - --service-account-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem
@@ -323,6 +327,7 @@ write_files:
           image: {{.HyperkubeImageRepo}}:{{.K8sVer}}
           command:
           - /hyperkube
+          - --v=4
           - scheduler
           - --master=http://127.0.0.1:8080
           - --leader-elect=true
